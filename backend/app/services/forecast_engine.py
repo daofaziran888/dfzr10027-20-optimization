@@ -107,22 +107,27 @@ def exponential_smoothing_forecast(values: list[float], alpha: float = 0.3, hori
     }
 
 
-def run_forecast_for_metric(metric_code: str, algorithm: str | None = None, horizon: int = 7) -> dict[str, Any]:
-    """为指定指标执行预测计算，自动选择算法或按传入算法执行。"""
-    # 映射指标到数值列
-    if "GMV" in metric_code or "gmv" in metric_code.lower():
-        values = [p["gmv"] for p in TREND_POINTS]
-    elif "UV" in metric_code or "uv" in metric_code.lower():
-        values = [float(p["uv"]) for p in TREND_POINTS]
-    elif "CVR" in metric_code or "cvr" in metric_code.lower():
-        values = [p["paid_uv"] / p["total_uv"] if p["total_uv"] else 0.0 for p in TREND_POINTS]
-    else:
-        values = [p["gmv"] for p in TREND_POINTS]
+def run_forecast_on_sample(
+    metric_code: str,
+    values: list[float],
+    point_dates: list[str],
+    algorithm: str | None = None,
+    horizon: int = 7,
+) -> dict[str, Any]:
+    """基于调用方给定的训练样本（数值与对应观测日期）执行预测。
 
-    # 查找 forecast 记录
-    forecasts = [f for f in store.rows("forecast") if f.get("预测指标") == metric_code]
-    if forecasts and algorithm is None:
-        algorithm = str(forecasts[0].get("预测算法", "线性趋势"))
+    批量报表共用同一份训练样本时走这里：样本由报表登记的截止日与训练窗口
+    切片得到，引擎不再自行取全量数据，保证「同指标、同截止日、同样本」
+    算出的章节完全一致。
+    """
+    if len(values) != len(point_dates) or len(values) < 2:
+        return {"error": "数据不足"}
+
+    # 未指定算法时回退到该指标已登记的预测方案
+    if algorithm is None:
+        forecasts = [f for f in store.rows("forecast") if f.get("预测指标") == metric_code]
+        if forecasts:
+            algorithm = str(forecasts[0].get("预测算法", "线性趋势"))
 
     if algorithm is None or "线性" in algorithm:
         result = linear_forecast(values, horizon)
@@ -138,11 +143,26 @@ def run_forecast_for_metric(metric_code: str, algorithm: str | None = None, hori
     result["actual_count"] = len(values)
     result["last_actual"] = round(values[-1], 2) if values else 0.0
 
-    # 生成预测日期
-    last_date = datetime.strptime(TREND_POINTS[-1]["日期"], "%Y-%m-%d").date()
+    # 预测日期从训练样本最后一个观测日往后推，而不是写死 fixtures 末日
+    last_date = datetime.strptime(point_dates[-1], "%Y-%m-%d").date()
     result["forecast_dates"] = [(last_date + timedelta(days=i)).isoformat() for i in range(1, horizon + 1)]
-
     return result
+
+
+def run_forecast_for_metric(metric_code: str, algorithm: str | None = None, horizon: int = 7) -> dict[str, Any]:
+    """为指定指标执行预测计算，自动选择算法或按传入算法执行。"""
+    # 映射指标到数值列
+    if "GMV" in metric_code or "gmv" in metric_code.lower():
+        values = [p["gmv"] for p in TREND_POINTS]
+    elif "UV" in metric_code or "uv" in metric_code.lower():
+        values = [float(p["uv"]) for p in TREND_POINTS]
+    elif "CVR" in metric_code or "cvr" in metric_code.lower():
+        values = [p["paid_uv"] / p["total_uv"] if p["total_uv"] else 0.0 for p in TREND_POINTS]
+    else:
+        values = [p["gmv"] for p in TREND_POINTS]
+
+    point_dates = [p["日期"] for p in TREND_POINTS]
+    return run_forecast_on_sample(metric_code, values, point_dates, algorithm, horizon)
 
 
 def batch_forecast_all() -> dict[str, Any]:
